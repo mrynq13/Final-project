@@ -1,1 +1,287 @@
+import pygame
+import numpy as np
+import random
+import math
+from pygame import mixer
+from typing import Tuple
 
+# -------------------- Constants --------------------
+WIDTH, HEIGHT = 1024, 600
+FPS = 60
+
+# Colors
+BG = (250, 248, 240)
+DARK = (40, 40, 50)
+GREEN = (56, 176, 0)
+RED = (220, 68, 60)
+BLUE = (30, 144, 255)
+YELLOW = (255, 204, 0)
+GRAY = (180, 180, 185)
+WHITE = (255, 255, 255)
+
+pygame.init()
+pygame.mixer.init()
+
+# -------------------- Sound Helper --------------------
+def generate_tone(freq=440, duration_ms=300, volume=0.4):
+    sample_rate = 44100
+    t = np.linspace(0, duration_ms/1000, int(sample_rate*duration_ms/1000), False)
+    wave = np.sin(2*np.pi*freq*t)*32767
+    wave = wave.astype(np.int16)
+    sound = pygame.sndarray.make_sound(wave)
+    sound.set_volume(volume)
+    return sound
+
+
+# Sounds
+POSITIVE_SOUND = generate_tone(880, 250, 0.5)
+NEGATIVE_SOUND = generate_tone(180, 300, 0.5)
+CLICK_SOUND = generate_tone(520, 120, 0.4)
+
+# -------------------- UI Components --------------------
+class Button:
+    def __init__(self, rect: pygame.Rect, color: Tuple[int,int,int], icon_text: str, on_click):
+        self.rect = rect
+        self.color = color
+        self.icon_text = icon_text
+        self.on_click = on_click
+        self.hover = False
+
+    def draw(self, surface, font):
+        pygame.draw.rect(surface, WHITE, self.rect, border_radius=28)
+        pygame.draw.rect(surface, self.color, self.rect, width=6, border_radius=28)
+        if self.hover:
+            pygame.draw.rect(surface, self.color, self.rect.inflate(10,10), width=2, border_radius=32)
+        text_surface = font.render(self.icon_text, True, self.color)
+        surface.blit(text_surface, text_surface.get_rect(center=self.rect.center))
+
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEMOTION:
+            self.hover = self.rect.collidepoint(event.pos)
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button==1 and self.rect.collidepoint(event.pos):
+            CLICK_SOUND.play()
+            if self.on_click:
+                self.on_click()
+            return True
+        return False
+
+# -------------------- Face Drawing --------------------
+def draw_face(surface, center, radius, emotion):
+    x, y = center
+    pygame.draw.circle(surface, YELLOW, (x,y), radius)
+    pygame.draw.circle(surface, DARK, (x,y), radius, 6)
+    eye_dx = int(radius*0.4)
+    eye_y = int(y-radius*0.2)
+    for ex in (x-eye_dx, x+eye_dx):
+        pygame.draw.circle(surface, DARK, (ex, eye_y), max(6, radius//8))
+    
+    if emotion=="happy":
+        pygame.draw.arc(surface, DARK, (x-radius//2, y-5, radius, radius//1), 0.1*math.pi, 1.9*math.pi, 7)
+    elif emotion=="sad":
+        pygame.draw.arc(surface, DARK, (x-radius//2, y+radius//3, radius, radius//1), 1.1*math.pi, 1.9*math.pi, 7)
+    elif emotion=="angry":
+        pygame.draw.line(surface, DARK, (x-radius//3, y+radius//4),(x+radius//3, y+radius//4),8)
+        pygame.draw.line(surface, DARK, (x-eye_dx-10, eye_y-15),(x-eye_dx+10, eye_y-5),6)
+        pygame.draw.line(surface, DARK, (x+eye_dx+10, eye_y-15),(x+eye_dx-10, eye_y-5),6)
+    elif emotion=="surprised":
+        pygame.draw.circle(surface, DARK, (x, y+radius//4), radius//6, 8)
+
+# -------------------- Scenes --------------------
+class SceneBase:
+    def __init__(self, app):
+        self.app = app
+        
+    def handle_event(self, event):
+        if event.type==pygame.KEYDOWN:
+            if event.key==pygame.K_ESCAPE:
+                self.app.set_scene(MenuScene(self.app))
+            elif event.key==pygame.K_m:
+                self.app.toggle_mute()
+                
+    def update(self, dt): 
+        pass
+        
+    def draw(self, surface): 
+        pass
+
+class MenuScene(SceneBase):
+    def __init__(self, app):
+        super().__init__(app)
+        self.font = pygame.font.SysFont(None, 120)
+        self.title_font = pygame.font.SysFont(None, 72)
+        self.hint_font = pygame.font.SysFont(None, 34)
+        
+        button_width, button_height = 280, 180
+        start_x = WIDTH//2 - 300
+        self.buttons = [
+            Button(pygame.Rect(start_x, HEIGHT//2-90, button_width, button_height), BLUE,"🙂",
+                   lambda: app.set_scene(EmotionMatchScene(app))),
+            Button(pygame.Rect(start_x+320, HEIGHT//2-90, button_width, button_height), GREEN,"🫧",
+                   lambda: app.set_scene(TurnTakingScene(app)))
+        ]
+        
+    def handle_event(self, event):
+        super().handle_event(event)
+        for btn in self.buttons:
+            btn.handle_event(event)
+            
+    def draw(self, surface):
+        surface.fill(BG)
+        title = self.title_font.render("Social Skills Play", True, DARK)
+        surface.blit(title, title.get_rect(center=(WIDTH//2,90)))
+        
+        for btn in self.buttons:
+            btn.draw(surface, self.font)
+            
+        hint = self.hint_font.render("🙂 تشخیص احساسات | 🫧 تمرین نوبت‌گیری | ESC بازگشت | M قطع صدا", True, (90,90,90))
+        surface.blit(hint, hint.get_rect(center=(WIDTH//2, HEIGHT-30)))
+
+# -------------------- Emotion Match --------------------
+class EmotionMatchScene(SceneBase):
+    EMOTIONS = ["happy","sad","angry","surprised"]
+    
+    def __init__(self, app):
+        super().__init__(app)
+        self.reset_round()
+        
+    def reset_round(self):
+        self.target = random.choice(self.EMOTIONS)
+        self.choices = random.sample(self.EMOTIONS, 4)
+        self.feedback_timer = 0
+        
+        gap = WIDTH//5
+        y_pos = HEIGHT//2+40
+        self.face_rects = {}
+        for i, emo in enumerate(self.choices):
+            x_pos = gap*(i+1)
+            self.face_rects[emo] = pygame.Rect(x_pos-90, y_pos-90, 180, 180)
+            
+    def handle_event(self, event):
+        super().handle_event(event)
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for emo, rect in self.face_rects.items():
+                if rect.collidepoint(event.pos):
+                    if emo == self.target:
+                        POSITIVE_SOUND.play()
+                        self.feedback_timer = 0.5
+                    else:
+                        NEGATIVE_SOUND.play()
+                        self.feedback_timer = -0.5
+                    pygame.time.set_timer(pygame.USEREVENT+1, 500, loops=1)
+                    
+        if event.type == pygame.USEREVENT+1:
+            self.reset_round()
+            
+    def draw(self, surface):
+        surface.fill(BG)
+        
+        # Draw target face
+        target_rect = pygame.Rect(WIDTH//2-110, 40, 220, 220)
+        draw_face(surface, target_rect.center, 100, self.target)
+        
+        if pygame.time.get_ticks()//300%2==0:
+            pygame.draw.rect(surface, BLUE, target_rect.inflate(16,16), 8, 18)
+            
+        # Draw choice faces
+        for emo, rect in self.face_rects.items():
+            draw_face(surface, rect.center, 80, emo)
+            pygame.draw.rect(surface, DARK, rect, 4, 16)
+            
+        # Draw feedback
+        if self.feedback_timer != 0:
+            color = GREEN if self.feedback_timer > 0 else RED
+            pygame.draw.circle(surface, color, (WIDTH//2, HEIGHT-70), 34)
+
+# -------------------- Turn Taking --------------------
+class TurnTakingScene(SceneBase):
+    def __init__(self, app):
+        super().__init__(app)
+        self.turn = "buddy"
+        self.bubbles = [self.create_bubble() for _ in range(4)]
+        self.timer = 0
+        self.wait_time = 1.0
+        self.score = 0
+        
+    def create_bubble(self):
+        return [random.randint(120, WIDTH-120), 
+                random.randint(200, HEIGHT-120), 
+                random.randint(30, 60)]
+                
+    def handle_event(self, event):
+        super().handle_event(event)
+        
+        if self.turn == "child" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mouse_x, mouse_y = event.pos
+            for bubble in list(self.bubbles):
+                x, y, r = bubble
+                if (mouse_x - x)**2 + (mouse_y - y)**2 <= r**2:
+                    POSITIVE_SOUND.play()
+                    self.bubbles.remove(bubble)
+                    self.score += 1
+                    self.turn = "buddy"
+                    self.timer = 0
+                    
+    def update(self, dt):
+        self.timer += dt
+        
+        if self.turn == "buddy" and self.timer >= self.wait_time:
+            if len(self.bubbles) < 8:  # حداکثر 8 حباب
+                self.bubbles.append(self.create_bubble())
+            self.turn = "child"
+            
+    def draw(self, surface):
+        surface.fill(BG)
+        
+        # Draw bubbles
+        for bubble in self.bubbles:
+            x, y, r = bubble
+            pygame.draw.circle(surface, BLUE, (x, y), r)
+            pygame.draw.circle(surface, DARK, (x, y), r, 3)
+            
+        # Draw turn indicator
+        turn_text = f"نوبت: {'کودک' if self.turn == 'child' else 'همبازی'}"
+        font = pygame.font.SysFont(None, 48)
+        text_surface = font.render(turn_text, True, DARK)
+        surface.blit(text_surface, (50, 50))
+        
+        # Draw score
+        score_text = f"امتیاز: {self.score}"
+        score_surface = font.render(score_text, True, GREEN)
+        surface.blit(score_surface, (WIDTH-200, 50))
+
+# -------------------- Main App --------------------
+class SocialSkillsApp:
+    def __init__(self):
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Social Skills Play")
+        self.clock = pygame.time.Clock()
+        self.muted = False
+        self.scene = MenuScene(self)
+        
+    def set_scene(self, scene):
+        self.scene = scene
+        
+    def toggle_mute(self):
+        self.muted = not self.muted
+        pygame.mixer.music.set_volume(0.0 if self.muted else 1.0)
+        
+    def run(self):
+        running = True
+        while running:
+            dt = self.clock.tick(FPS) / 1000.0
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                self.scene.handle_event(event)
+                
+            self.scene.update(dt)
+            self.scene.draw(self.screen)
+            pygame.display.flip()
+            
+        pygame.quit()
+
+# -------------------- Run the Game --------------------
+if __name__ == "__main__":
+    app = SocialSkillsApp()
+    app.run()
